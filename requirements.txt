@@ -8,4 +8,4 @@ itsdangerous>=2.1
 python-multipart>=0.0.9
 
 # Testing
-pytest>=8.0
+pytest>=9.0.3,<10.0
