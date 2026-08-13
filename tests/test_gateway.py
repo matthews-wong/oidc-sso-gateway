@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from urllib.parse import urlparse
+
 import pytest
 from jwt.exceptions import ExpiredSignatureError, InvalidSignatureError, InvalidTokenError
 
 from ssogateway import oidc
+from ssogateway.main import _safe_next
 
 
 def test_unauthenticated_protected_route_redirects_to_login(client):
@@ -48,6 +51,67 @@ def test_callback_rejects_bad_state(client):
     # No prior /login means no flow cookie, so state validation must fail.
     resp = client.get("/callback?code=abc&state=nope", follow_redirects=False)
     assert resp.status_code == 400
+
+
+def _walk_redirects_until_external(client, start_path, *, limit=10):
+    """Follow same-host redirects; return the first response that is either a
+    terminal (non-redirect) page or a redirect pointing to a foreign host."""
+    path = start_path
+    for _ in range(limit):
+        resp = client.get(path, follow_redirects=False)
+        if resp.status_code not in (301, 302, 303, 307, 308):
+            return resp
+        location = resp.headers["location"]
+        parsed = urlparse(location)
+        if parsed.scheme and parsed.netloc and parsed.netloc != "testserver":
+            return resp  # off-site redirect: hand it back for inspection
+        path = location
+    raise AssertionError("redirect loop did not settle")
+
+
+@pytest.mark.parametrize(
+    "evil_next",
+    [
+        "https://evil.example/phish",
+        "//evil.example/phish",
+        "/\\evil.example/phish",
+        "http:/evil.example",
+    ],
+)
+def test_login_next_open_redirect_is_neutralized(client, evil_next):
+    # An attacker-supplied ``next`` must never become the post-login redirect
+    # target. The victim authenticates legitimately, then the gateway must land
+    # them on a same-origin path rather than the attacker's site.
+    resp = _walk_redirects_until_external(client, f"/login?next={evil_next}")
+    location = resp.headers.get("location", "")
+    assert "evil.example" not in location
+    # Flow completes on-site: the terminal response is the protected app (200).
+    assert resp.status_code == 200
+    assert resp.json()["user"]["sub"] == "mock-user-123"
+
+
+def test_safe_next_allows_local_paths():
+    assert _safe_next("/app/dashboard") == "/app/dashboard"
+    assert _safe_next("/app/x?y=1&z=2") == "/app/x?y=1&z=2"
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        None,
+        "",
+        "https://evil.example",
+        "//evil.example",
+        "/\\evil.example",
+        "\\\\evil.example",
+        "http://evil.example",
+        "app/relative",
+    ],
+)
+def test_safe_next_rejects_unsafe_targets(candidate):
+    # Everything that is not an unambiguous same-origin absolute path falls back
+    # to the safe default.
+    assert _safe_next(candidate) == "/app/"
 
 
 def _valid_context(app):

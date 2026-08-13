@@ -23,6 +23,27 @@ from .mock_idp import MockIdP, build_mock_idp_router
 from .session import SessionManager
 
 PROTECTED_PREFIX = "/app"
+DEFAULT_NEXT = "/app/"
+
+
+def _safe_next(candidate: Optional[str], default: str = DEFAULT_NEXT) -> str:
+    """Return a same-origin redirect path, falling back to ``default``.
+
+    The post-login ``next`` target is attacker-influenceable (it arrives as a
+    query parameter on ``/login``). Only an unambiguous root-relative path is
+    allowed through; absolute URLs, protocol-relative ``//host`` references and
+    backslash-obfuscated variants are rejected to prevent an open redirect that
+    would let the trusted gateway origin bounce a freshly authenticated victim
+    to an attacker-controlled site.
+    """
+    if not candidate:
+        return default
+    # Browsers treat backslashes in a Location as forward slashes, so normalise
+    # before deciding whether this is a network-path reference.
+    normalized = candidate.replace("\\", "/")
+    if not normalized.startswith("/") or normalized.startswith("//"):
+        return default
+    return candidate
 
 
 @asynccontextmanager
@@ -104,7 +125,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         return {"status": "ok"}
 
     @app.get("/login")
-    async def login(request: Request, next: str = Query("/app/")) -> RedirectResponse:
+    async def login(request: Request, next: str = Query(DEFAULT_NEXT)) -> RedirectResponse:
+        # Neutralise open-redirect payloads at the boundary so only a safe,
+        # same-origin path is ever bound into the (signed) flow cookie.
+        next = _safe_next(next)
         client: httpx.AsyncClient = request.app.state.http_client
         discovery = await oidc.fetch_discovery(client, settings.oidc_discovery_url)
 
@@ -172,7 +196,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         session_token = request.app.state.session_manager.encode(
             {"sub": claims["sub"], "email": claims.get("email"), "name": claims.get("name")}
         )
-        next_url = flow.get("next") or "/app/"
+        # Defence in depth: re-validate before redirecting, never trusting the
+        # cookie's ``next`` to be a safe target even though /login sanitised it.
+        next_url = _safe_next(flow.get("next"))
         response = RedirectResponse(next_url, status_code=302)
         _set_cookie(
             response, settings.session_cookie_name, session_token, settings.session_ttl_seconds

@@ -144,6 +144,11 @@ required. Examples of discovery URLs:
 - **ID-token validation** enforces the RS256 signature against the JWKS key
   matched by `kid`, plus `iss`, `aud`, presence and freshness of `exp`/`iat`,
   and the `nonce`. Any failure yields a 401 and no session is issued.
+- **Post-login redirects** are constrained to same-origin paths. The `next`
+  target supplied to `/login` is validated (absolute, protocol-relative, and
+  backslash-obfuscated URLs are rejected) before it is bound into the flow
+  cookie and again before the final redirect, preventing an open redirect from
+  the trusted gateway origin.
 - **Cookies** are `HttpOnly` and `SameSite=Lax`, and set `Secure` automatically
   when `PUBLIC_BASE_URL` is HTTPS. The session cookie is signed (not encrypted)
   and carries only identity claims — never secrets. Set a strong random
@@ -182,8 +187,9 @@ The suite runs entirely offline. It wires the gateway's back-channel `httpx`
 client to an ASGI transport over the app itself, so token/JWKS/discovery calls
 reach the mounted mock IdP in-process. Coverage includes: unauthenticated
 requests redirect to `/login`; the full flow yields a session and access to a
-protected route; and tampered, expired, wrong-audience, and nonce-mismatched ID
-tokens are all rejected.
+protected route; tampered, expired, wrong-audience, and nonce-mismatched ID
+tokens are all rejected; and attacker-supplied `next` targets are neutralised so
+login cannot open-redirect off-site.
 
 ## Roadmap
 
